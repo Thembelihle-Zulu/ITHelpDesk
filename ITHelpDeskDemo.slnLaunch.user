@@ -1,0 +1,15 @@
+[
+  {
+    "Name": "New Profile",
+    "Projects": [
+      {
+        "Path": "ITHelpDeskDemo\\ITHelpDeskDemo.csproj",
+        "Action": "StartWithoutDebugging"
+      },
+      {
+        "Path": "IdentityServer\\AuthProject.csproj",
+        "Action": "StartWithoutDebugging"
+      }
+    ]
+  }
+]
