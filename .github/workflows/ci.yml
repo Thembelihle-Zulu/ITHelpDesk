@@ -1,0 +1,137 @@
+name: Build and smoke test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: "Optional older commit to build and test alongside this one, to compare results"
+        required: false
+        default: ""
+
+jobs:
+  build-and-test:
+    name: Build and smoke test (${{ matrix.ref }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(inputs.baseline_ref && format('["{0}","{1}"]', inputs.baseline_ref, github.sha) || format('["{0}"]', github.sha)) }}
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "CiOnly_Passw0rd!"
+        ports:
+          - 1433:1433
+
+    env:
+      ASPNETCORE_ENVIRONMENT: Development
+      DOTNET_NOLOGO: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build the solution file
+        id: sln
+        continue-on-error: true
+        run: dotnet build ITHelpDeskDemo.sln -c Release
+
+      - name: Build each project
+        run: |
+          dotnet build ITHelpDeskDemo/ITHelpDeskDemo.csproj -c Release
+          dotnet build IdentityServer/AuthProject.csproj -c Release
+
+      - name: Write CI-only configuration
+        run: |
+          cat > ci-appsettings.json <<'EOF'
+          {
+            "ConnectionStrings": {
+              "DefaultConnection": "Server=localhost,1433;Database=ITHelpDesk;User Id=sa;Password=CiOnly_Passw0rd!;TrustServerCertificate=True"
+            },
+            "Jwt": {
+              "Key": "ci-only-signing-key-0123456789-abcdefghijklmnopqrstuvwxyz",
+              "Issuer": "ITHelpDesk.Identity",
+              "Audience": "ITHelpDesk.Api"
+            },
+            "Logging": { "LogLevel": { "Default": "Warning" } }
+          }
+          EOF
+          cp ci-appsettings.json ITHelpDeskDemo/appsettings.json
+          cp ci-appsettings.json IdentityServer/appsettings.json
+
+      - name: Create the database
+        run: |
+          dotnet tool install --global dotnet-ef --version 9.0.4
+          for i in $(seq 1 30); do (echo > /dev/tcp/localhost/1433) 2>/dev/null && break; sleep 2; done
+          dotnet ef database update --project ITHelpDeskDemo
+
+      - name: Start both services
+        run: |
+          (cd IdentityServer && nohup dotnet run -c Release --no-build --no-launch-profile --urls http://localhost:5079 > ../identity.log 2>&1 &)
+          (cd ITHelpDeskDemo && nohup dotnet run -c Release --no-build --no-launch-profile --urls http://localhost:5169 > ../api.log 2>&1 &)
+          for i in $(seq 1 60); do
+            a=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5079/swagger/v1/swagger.json || true)
+            b=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5169/swagger/v1/swagger.json || true)
+            [ "$a" = "200" ] && [ "$b" = "200" ] && echo "Both services are up" && exit 0
+            sleep 2
+          done
+          echo "Services did not start"; cat identity.log api.log; exit 1
+
+      - name: Call the API
+        run: |
+          set -u
+          ID=http://localhost:5079; API=http://localhost:5169
+          results=results.md
+          echo "| Check | HTTP status |" > $results
+          echo "| --- | --- |" >> $results
+          check() { echo "| $1 | $2 |" >> $results; echo "$1 -> $2"; }
+          login() {
+            curl -s -X POST $ID/api/Login/Login -H "Content-Type: application/json" \
+              -d '{"username":"testadmin@example.com","password":"Test@1234"}' | jq -r '.token // .Token // empty'
+          }
+          call() { curl -s -o /dev/null -w "%{http_code}" -X "$1" "$API$2" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" ${3:+-d "$3"}; }
+
+          check "Identity service: Swagger loads" "$(curl -s -o /dev/null -w '%{http_code}' $ID/swagger/v1/swagger.json)"
+          check "API: Swagger loads (all controllers registered)" "$(curl -s -o /dev/null -w '%{http_code}' $API/swagger/v1/swagger.json)"
+          check "Log in with wrong password is rejected" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $ID/api/Login/Login -H 'Content-Type: application/json' -d '{"username":"testadmin@example.com","password":"wrong"}')"
+
+          TOKEN=$(login)
+          [ -n "$TOKEN" ] && check "Seeded SuperAdmin logs in and gets a JWT" "200" || check "Seeded SuperAdmin logs in and gets a JWT" "FAILED"
+          check "API without a token is rejected" "$(curl -s -o /dev/null -w '%{http_code}' $API/api/AppUser/Users)"
+          check "GET /api/AppUser/Users (SuperAdmin)" "$(call GET /api/AppUser/Users)"
+          check "GET /api/AppUser/Agents (SuperAdmin)" "$(call GET /api/AppUser/Agents)"
+          check "GET /api/Tickets/AllTickets before Agent role" "$(call GET /api/Tickets/AllTickets)"
+
+          USER_ID=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | awk '{l=length($0)%4; if(l==2)$0=$0"=="; else if(l==3)$0=$0"="; print}' | base64 -d 2>/dev/null | jq -r '.id')
+          check "PUT /api/AppUser/AllocateRole/{id} (make SuperAdmin an Agent)" "$(call PUT /api/AppUser/AllocateRole/$USER_ID)"
+          TOKEN=$(login)
+          check "GET /api/AppUser/agent/{id}" "$(call GET /api/AppUser/agent/$USER_ID)"
+          check "GET /api/Tickets/AllTickets (Agent)" "$(call GET /api/Tickets/AllTickets)"
+          check "GET /api/Users/All (Agent)" "$(call GET /api/Users/All)"
+          check "GET /api/Comments (signed in)" "$(call GET /api/Comments)"
+          check "GET /api/Tickets/999 (missing ticket)" "$(call GET /api/Tickets/999)"
+
+          {
+            echo "## Results for \`${{ matrix.ref }}\`"
+            echo
+            echo "Solution file build: **${{ steps.sln.outcome }}**"
+            echo
+            cat $results
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Service logs
+        if: always()
+        run: |
+          echo "--- identity.log ---"; tail -n 60 identity.log || true
+          echo "--- api.log ---"; tail -n 60 api.log || true
