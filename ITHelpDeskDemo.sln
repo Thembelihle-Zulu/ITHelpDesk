@@ -9,10 +9,6 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharedLibrary", "SharedLibr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AuthProject", "IdentityServer\AuthProject.csproj", "{F74B2CC0-8549-4C7F-96F2-874C46245356}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "IdentityApp", "IdentityApp\IdentityApp.csproj", "{BABD9B09-16F9-4113-8D74-6FDA6470931C}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharedLibrary3", "SharedLibrary3\SharedLibrary3.csproj", "{B55BF98A-F6DB-4A6F-A40E-7840A5F49B91}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -31,14 +27,6 @@ Global
 		{F74B2CC0-8549-4C7F-96F2-874C46245356}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F74B2CC0-8549-4C7F-96F2-874C46245356}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F74B2CC0-8549-4C7F-96F2-874C46245356}.Release|Any CPU.Build.0 = Release|Any CPU
-		{BABD9B09-16F9-4113-8D74-6FDA6470931C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{BABD9B09-16F9-4113-8D74-6FDA6470931C}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{BABD9B09-16F9-4113-8D74-6FDA6470931C}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{BABD9B09-16F9-4113-8D74-6FDA6470931C}.Release|Any CPU.Build.0 = Release|Any CPU
-		{B55BF98A-F6DB-4A6F-A40E-7840A5F49B91}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{B55BF98A-F6DB-4A6F-A40E-7840A5F49B91}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{B55BF98A-F6DB-4A6F-A40E-7840A5F49B91}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{B55BF98A-F6DB-4A6F-A40E-7840A5F49B91}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
