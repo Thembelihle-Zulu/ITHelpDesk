@@ -13,9 +13,6 @@ namespace AuthProject.Data
             var UserManager =serviceProvider.GetRequiredService<UserManager<ApplicationUser>>();
             string[] rolenames = { "Admin","SuperAdmin", "User", "Agent" };
 
-            Console.WriteLine(email);
-            Console.WriteLine(username);
-            Console.WriteLine(password);
             IdentityResult roleResult;
 
             foreach(var roleName in rolenames)
@@ -35,8 +32,6 @@ namespace AuthProject.Data
                 UserName = username,
                 Email=email
             };
-            //Console.WriteLine(superAdmin.Email);
-            //Console.WriteLine(superAdmin.UserName);
             var User=await UserManager.FindByEmailAsync(superAdmin.Email);
 
             if ( User == null)
