@@ -30,7 +30,9 @@ namespace AuthProject.Data
             var superAdmin = new ApplicationUser
             {
                 UserName = username,
-                Email=email
+                Email = email,
+                FullName = "Super Admin",
+                Department = "IT"
             };
             var User=await UserManager.FindByEmailAsync(superAdmin.Email);
 
