@@ -32,6 +32,8 @@ jobs:
     env:
       ASPNETCORE_ENVIRONMENT: Development
       DOTNET_NOLOGO: "true"
+      # Only the latest commit fails the build on a broken check; a baseline is just reported for comparison.
+      STRICT: ${{ matrix.ref == github.sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +43,21 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Patch the admin seed bug in older commits
+        # Commits before the fix created the SuperAdmin without the required FullName and Department,
+        # which crashes the identity service on an empty database. Patch it so older commits can be compared.
+        run: |
+          python3 - <<'EOF'
+          p = "IdentityServer/Data/SeedData.cs"
+          s = open(p, encoding="utf-8-sig").read()
+          if "FullName" in s:
+              print("Seed already sets FullName and Department; nothing to patch")
+          else:
+              s = s.replace("Email=email", 'Email=email, FullName="Super Admin", Department="IT"', 1)
+              open(p, "w", encoding="utf-8-sig").write(s)
+              print("Patched the admin seed for this run only")
+          EOF
 
       - name: Build the solution file
         id: sln
@@ -64,11 +81,50 @@ jobs:
               "Issuer": "ITHelpDesk.Identity",
               "Audience": "ITHelpDesk.Api"
             },
+            "EMAIL_CONFIGURATION": {
+              "EMAIL": "helpdesk@ci.test",
+              "PASSWORD": "not-used",
+              "HOST": "localhost",
+              "PORT": 2525
+            },
             "Logging": { "LogLevel": { "Default": "Warning" } }
           }
           EOF
           cp ci-appsettings.json ITHelpDeskDemo/appsettings.json
           cp ci-appsettings.json IdentityServer/appsettings.json
+
+      - name: Start a local test mail server
+        # The app sends mail over SMTP with TLS and a login, so run a trusted local server that just records messages.
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost" -keyout smtp.key -out smtp.crt 2>/dev/null
+          sudo cp smtp.crt /usr/local/share/ca-certificates/ci-smtp.crt
+          sudo update-ca-certificates >/dev/null
+          pip install --quiet aiosmtpd
+          cat > fake_smtp.py <<'EOF'
+          import ssl, time
+          from aiosmtpd.controller import Controller
+          from aiosmtpd.smtp import AuthResult
+
+          class Recorder:
+              async def handle_DATA(self, server, session, envelope):
+                  with open("smtp.log", "a") as f:
+                      f.write(f"MESSAGE FOLLOWS to={envelope.rcpt_tos}\n")
+                  return "250 OK"
+
+          def accept_any(server, session, envelope, mechanism, auth_data):
+              return AuthResult(success=True)
+
+          ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+          ctx.load_cert_chain("smtp.crt", "smtp.key")
+          Controller(Recorder(), hostname="localhost", port=2525, tls_context=ctx,
+                     require_starttls=True, authenticator=accept_any, auth_require_tls=True).start()
+          while True:
+              time.sleep(3600)
+          EOF
+          touch smtp.log
+          nohup python fake_smtp.py > fake_smtp.out 2>&1 &
+          sleep 3
 
       - name: Create the database
         run: |
@@ -92,35 +148,85 @@ jobs:
         run: |
           set -u
           ID=http://localhost:5079; API=http://localhost:5169
+          ADMIN='{"username":"testadmin@example.com","password":"Test@1234"}'
+          failures=0
           results=results.md
-          echo "| Check | HTTP status |" > $results
-          echo "| --- | --- |" >> $results
-          check() { echo "| $1 | $2 |" >> $results; echo "$1 -> $2"; }
-          login() {
-            curl -s -X POST $ID/api/Login/Login -H "Content-Type: application/json" \
-              -d '{"username":"testadmin@example.com","password":"Test@1234"}' | jq -r '.token // .Token // empty'
+          echo "| Check | Expected | Actual | Result |" > $results
+          echo "| --- | --- | --- | --- |" >> $results
+
+          # call METHOD URL [TOKEN] [JSON] -> prints the HTTP status; the body is saved in body.json
+          call() {
+            local args=(-s -o body.json -w '%{http_code}' -X "$1" "$2" -H 'Content-Type: application/json')
+            [ -n "${3:-}" ] && args+=(-H "Authorization: Bearer $3")
+            [ -n "${4:-}" ] && args+=(-d "$4")
+            curl "${args[@]}"
           }
-          call() { curl -s -o /dev/null -w "%{http_code}" -X "$1" "$API$2" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" ${3:+-d "$3"}; }
+          # check NAME EXPECTED ACTUAL [info]: "info" checks are reported but never fail the build
+          check() {
+            local result="pass"
+            if [ "$2" != "$3" ]; then
+              if [ "${4:-}" = "info" ]; then result="known issue"; else result="FAIL"; failures=$((failures+1)); fi
+            fi
+            echo "| $1 | $2 | $3 | $result |" >> $results
+            echo "$result: $1 (expected $2, got $3)"
+          }
+          token() { jq -r '.token // .Token // empty' body.json; }
+          claim() {
+            local p; p=$(echo "$1" | cut -d. -f2 | tr '_-' '/+')
+            while [ $(( ${#p} % 4 )) -ne 0 ]; do p="$p="; done
+            echo "$p" | base64 -d | jq -r "$2"
+          }
 
-          check "Identity service: Swagger loads" "$(curl -s -o /dev/null -w '%{http_code}' $ID/swagger/v1/swagger.json)"
-          check "API: Swagger loads (all controllers registered)" "$(curl -s -o /dev/null -w '%{http_code}' $API/swagger/v1/swagger.json)"
-          check "Log in with wrong password is rejected" "$(curl -s -o /dev/null -w '%{http_code}' -X POST $ID/api/Login/Login -H 'Content-Type: application/json' -d '{"username":"testadmin@example.com","password":"wrong"}')"
+          check "Identity service: Swagger loads" 200 "$(call GET $ID/swagger/v1/swagger.json)"
+          check "API: Swagger loads (all controllers registered)" 200 "$(call GET $API/swagger/v1/swagger.json)"
 
-          TOKEN=$(login)
-          [ -n "$TOKEN" ] && check "Seeded SuperAdmin logs in and gets a JWT" "200" || check "Seeded SuperAdmin logs in and gets a JWT" "FAILED"
-          check "API without a token is rejected" "$(curl -s -o /dev/null -w '%{http_code}' $API/api/AppUser/Users)"
-          check "GET /api/AppUser/Users (SuperAdmin)" "$(call GET /api/AppUser/Users)"
-          check "GET /api/AppUser/Agents (SuperAdmin)" "$(call GET /api/AppUser/Agents)"
-          check "GET /api/Tickets/AllTickets before Agent role" "$(call GET /api/Tickets/AllTickets)"
+          check "Register a user" 200 "$(call POST $ID/api/Login/register "" \
+            '{"fullName":"Alice User","username":"alice","emailAddress":"alice@ci.test","department":"Finance","password":"Alice#2026pw"}')"
+          check "Register a second user" 200 "$(call POST $ID/api/Login/register "" \
+            '{"fullName":"Bob Agent","username":"bob","emailAddress":"bob@ci.test","department":"IT","password":"Bobby#2026pw"}')"
+          check "Log in with a wrong password is rejected" 401 "$(call POST $ID/api/Login/Login "" '{"username":"alice@ci.test","password":"wrong"}')"
 
-          USER_ID=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | awk '{l=length($0)%4; if(l==2)$0=$0"=="; else if(l==3)$0=$0"="; print}' | base64 -d 2>/dev/null | jq -r '.id')
-          check "PUT /api/AppUser/AllocateRole/{id} (make SuperAdmin an Agent)" "$(call PUT /api/AppUser/AllocateRole/$USER_ID)"
-          TOKEN=$(login)
-          check "GET /api/AppUser/agent/{id}" "$(call GET /api/AppUser/agent/$USER_ID)"
-          check "GET /api/Tickets/AllTickets (Agent)" "$(call GET /api/Tickets/AllTickets)"
-          check "GET /api/Users/All (Agent)" "$(call GET /api/Users/All)"
-          check "GET /api/Comments (signed in)" "$(call GET /api/Comments)"
-          check "GET /api/Tickets/999 (missing ticket)" "$(call GET /api/Tickets/999)"
+          check "Seeded SuperAdmin logs in" 200 "$(call POST $ID/api/Login/Login "" "$ADMIN")"
+          ADMIN_TOKEN=$(token)
+          check "User logs in" 200 "$(call POST $ID/api/Login/Login "" '{"username":"alice@ci.test","password":"Alice#2026pw"}')"
+          ALICE_TOKEN=$(token); ALICE_ID=$(claim "$ALICE_TOKEN" .id)
+          call POST $ID/api/Login/Login "" '{"username":"bob@ci.test","password":"Bobby#2026pw"}' > /dev/null
+          BOB_ID=$(claim "$(token)" .id)
+
+          check "API without a token is rejected" 401 "$(call GET $API/api/AppUser/Users)"
+          check "SuperAdmin lists users" 200 "$(call GET $API/api/AppUser/Users "$ADMIN_TOKEN")"
+          check "SuperAdmin makes a user an agent" 200 "$(call PUT $API/api/AppUser/AllocateRole/$BOB_ID "$ADMIN_TOKEN")"
+          check "Agent logs in" 200 "$(call POST $ID/api/Login/Login "" '{"username":"bob@ci.test","password":"Bobby#2026pw"}')"
+          BOB_TOKEN=$(token)
+          check "Agent's token carries the Agent role" true "$(claim "$BOB_TOKEN" '[.roles] | flatten | index("Agent") != null')"
+          check "SuperAdmin lists agents" 200 "$(call GET $API/api/AppUser/Agents "$ADMIN_TOKEN")"
+          check "New agent is in the agent list" true "$(jq --arg id "$BOB_ID" 'any(.[]; .agentId == $id)' body.json)"
+          check "Get one agent" 200 "$(call GET $API/api/AppUser/agent/$BOB_ID "$ADMIN_TOKEN")"
+
+          check "Create a ticket" 201 "$(call POST $API/api/Tickets/createTicket "" \
+            "{\"title\":\"Laptop will not boot\",\"description\":\"Black screen after the update\",\"category\":\"Hardware\",\"priority\":\"High\",\"status\":\"Open\",\"userId\":\"$ALICE_ID\"}")"
+          TICKET_ID=$(jq -r '.ticketId' body.json)
+          sleep 2
+          check "Emails sent (2 sign-up confirmations + 1 new-ticket alert)" 3 "$(grep -c 'MESSAGE FOLLOWS' smtp.log)"
+
+          check "Agent lists all tickets" 200 "$(call GET $API/api/Tickets/AllTickets "$BOB_TOKEN")"
+          check "New ticket is in the list" true "$(jq --argjson id "${TICKET_ID:-0}" 'any(.[]; .ticketId == $id)' body.json)"
+          check "Agent opens the ticket" 200 "$(call GET $API/api/Tickets/$TICKET_ID "$BOB_TOKEN")"
+          check "Missing ticket returns 404" 404 "$(call GET $API/api/Tickets/999999 "$BOB_TOKEN")"
+          check "A normal user cannot list all tickets" 403 "$(call GET $API/api/Tickets/AllTickets "$ALICE_TOKEN")"
+          check "Agent lists users" 200 "$(call GET $API/api/Users/All "$BOB_TOKEN")"
+
+          check "Agent closes the ticket" 200 "$(call PUT $API/api/Tickets/updateStatus/$TICKET_ID "$BOB_TOKEN" \
+            "{\"title\":\"Laptop will not boot\",\"description\":\"Black screen after the update\",\"category\":\"Hardware\",\"priority\":\"High\",\"status\":\"Closed\",\"userId\":\"$ALICE_ID\",\"dateClosed\":\"2026-01-01T00:00:00Z\"}")"
+          call GET $API/api/Tickets/$TICKET_ID "$BOB_TOKEN" > /dev/null
+          check "Ticket status is now Closed" Closed "$(jq -r '.status' body.json)"
+
+          check "Agent adds a comment" 201 "$(call POST $API/api/Comments/CreateComment "$BOB_TOKEN" \
+            "{\"commentText\":\"Reinstalled the graphics driver\",\"ticketId\":${TICKET_ID:-0},\"agentId\":\"$BOB_ID\"}")" info
+          check "List comments" 200 "$(call GET $API/api/Comments "$BOB_TOKEN")"
+          check "Delete the ticket" 204 "$(call DELETE $API/api/Tickets/Delete/$TICKET_ID "$BOB_TOKEN")"
+
+          check "Admin password is not written to the logs" 0 "$(grep -c -F 'Test@1234' identity.log)"
 
           {
             echo "## Results for \`${{ matrix.ref }}\`"
@@ -130,8 +236,12 @@ jobs:
             cat $results
           } >> "$GITHUB_STEP_SUMMARY"
 
+          echo "Failed checks: $failures"
+          if [ "$STRICT" = "true" ] && [ "$failures" -gt 0 ]; then exit 1; fi
+
       - name: Service logs
         if: always()
         run: |
           echo "--- identity.log ---"; tail -n 60 identity.log || true
           echo "--- api.log ---"; tail -n 60 api.log || true
+          echo "--- smtp.log ---"; cat smtp.log || true
