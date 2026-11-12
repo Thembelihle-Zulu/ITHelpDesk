@@ -6,3 +6,4 @@ appsettings.Development.json
 .vs/
 SharedClassLibrary/
 .env
+*.user
