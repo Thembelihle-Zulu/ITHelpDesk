@@ -7,7 +7,7 @@ A backend for an internal IT help desk. Staff log support tickets, agents are al
 ## Features
 
 - **Tickets:** create, view, assign, update status (Open, In Progress, Closed) and delete tickets, each with a category (Software, Hardware) and priority (Low, Medium, High).
-- **Comments:** add, edit and delete comments on tickets.
+- **Comments (coming soon):** comments on tickets are in progress.
 - **Authentication:** a separate identity service handles registration, login, email confirmation and issues signed JWTs.
 - **Role-based access:** four roles (SuperAdmin, Admin, Agent, User) enforced on the API endpoints.
 - **Email notifications:** every agent is emailed when a new ticket is logged.
@@ -105,13 +105,14 @@ Open `/swagger` on either service, log in through the identity service, then cli
 | PUT | `/api/Tickets/assignTicket/{id}` | Admin | Assign a ticket to an agent |
 | PUT | `/api/Tickets/updateStatus/{id}` | Signed in | Update a ticket's status |
 | DELETE | `/api/Tickets/Delete/{id}` | Signed in | Delete a ticket |
-| GET / POST / PUT / DELETE | `/api/Comments/...` | Signed in | Manage ticket comments |
+| GET / POST / PUT / DELETE | `/api/Comments/...` | Signed in | Ticket comments (in progress) |
 | GET | `/api/AppUser/Users`, `/api/AppUser/Agents` | SuperAdmin, Admin, Agent | List users or agents |
 | PUT | `/api/AppUser/AllocateRole/{id}` | SuperAdmin, Admin, Agent | Give a user the Agent role |
 | GET / POST / PUT / DELETE | `/api/Users/...` | Agent | Manage users |
 
 ## Roadmap
 
+- Finish ticket comments
 - React front end for users, agents and admins
 - Take the ticket's user from the JWT claims instead of the request body, and require sign-in to log a ticket
 - Restrict status updates and deletes by role or ticket ownership
